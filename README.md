@@ -33,7 +33,6 @@ The project supports **face registration via webcam**, stores facial embeddings 
 ## 📁 Project Structure
 
 Face-Recognition-Login-System/
-
 │
 ├── app.py # Flask backend (login)
 ├── app_cli.py # CLI-based face registration
@@ -113,4 +112,5 @@ This project is for educational and learning purposes.
 👤 Author
 Anuj Bhatia
 GitHub: https://github.com/AnujBhatia7471
+
 
