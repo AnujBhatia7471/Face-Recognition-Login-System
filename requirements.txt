@@ -1,5 +1,6 @@
-onnxruntime==1.17.3
+onnxruntime==1.21.1
 numpy
 opencv-python
 flask
 gunicorn
+
