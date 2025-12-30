@@ -3,4 +3,4 @@ numpy
 opencv-python
 flask
 gunicorn
-
+scikit-learn==1.5.2
