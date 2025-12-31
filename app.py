@@ -6,13 +6,14 @@ import os
 import onnxruntime as ort
 import urllib.request
 import threading
+import gc
 
-print("🔥 app.py started")
+print("🔥 app.py started (MEMORY SAFE VERSION)")
 
 # ================= APP =================
 app = Flask(__name__)
 app.secret_key = "super-secret-key"
-app.debug = True
+app.debug = False   # ❌ NEVER True ON RENDER
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -39,10 +40,20 @@ conn.commit()
 conn.close()
 
 # ================= FACE DETECTOR =================
-face_detector = cv2.dnn.readNetFromCaffe(
-    os.path.join(BASE_DIR, "deploy.prototxt"),
-    os.path.join(BASE_DIR, "res10_300x300_ssd_iter_140000.caffemodel")
-)
+# ❌ REMOVED OPENCV DNN MODEL (200+ MB RAM)
+# Replaced with light center-crop approach
+
+def detect_face(img):
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    size = min(h, w)
+    cx, cy = w // 2, h // 2
+    face = img[
+        cy - size // 2 : cy + size // 2,
+        cx - size // 2 : cx + size // 2
+    ]
+    return face if face.size else None
 
 # ================= ARC FACE =================
 MODEL_URL = (
@@ -67,45 +78,28 @@ def get_arcface():
     with arc_lock:
         if arcface is None:
             ensure_model()
+
+            so = ort.SessionOptions()
+            so.enable_cpu_mem_arena = False   # 🔥 IMPORTANT
+            so.enable_mem_pattern = False
+            so.intra_op_num_threads = 1
+
             arcface = ort.InferenceSession(
                 MODEL_PATH,
+                sess_options=so,
                 providers=["CPUExecutionProvider"]
             )
             arc_input_name = arcface.get_inputs()[0].name
-            print("✅ ArcFace ready:", arcface.get_inputs()[0].shape)
+            print("✅ ArcFace loaded safely")
+
     return arcface
 
-# 🔥 PRELOAD MODEL ON START (IMPORTANT FOR RENDER)
-try:
-    print("⏳ Preloading ArcFace...")
-    get_arcface()
-    print("✅ ArcFace preloaded")
-except Exception as e:
-    print("❌ ArcFace preload failed:", e)
+# ❌ DO NOT PRELOAD MODEL ON RENDER
+# Lazy loading saves ~150MB during startup
 
 # ================= UTILS =================
 def cosine_sim(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
-
-def detect_face(img):
-    if img is None:
-        return None
-
-    h, w = img.shape[:2]
-    blob = cv2.dnn.blobFromImage(
-        img, 1.0, (300, 300), (104, 177, 123)
-    )
-    face_detector.setInput(blob)
-    dets = face_detector.forward()
-
-    for i in range(dets.shape[2]):
-        if dets[0, 0, i, 2] > 0.9:
-            box = dets[0, 0, i, 3:7] * np.array([w, h, w, h])
-            x1, y1, x2, y2 = box.astype(int)
-            face = img[y1:y2, x1:x2]
-            if face.size:
-                return face
-    return None
 
 def get_embedding(face):
     face = cv2.resize(face, (112, 112))
@@ -115,7 +109,9 @@ def get_embedding(face):
 
     session = get_arcface()
     emb = session.run(None, {arc_input_name: face})[0][0]
-    return emb / np.linalg.norm(emb)
+    emb = emb / np.linalg.norm(emb)
+
+    return emb.astype(np.float16)   # 🔥 50% memory reduction
 
 # ================= ROUTES =================
 @app.route("/")
@@ -153,8 +149,8 @@ def register():
             cv2.IMREAD_COLOR
         )
 
-        # 🔥 VERY IMPORTANT FOR RENDER
-        img = cv2.resize(img, (320, 240))
+        # 🔥 Smaller frame = lower RAM
+        img = cv2.resize(img, (224, 224))
 
         face = detect_face(img)
         if face is None:
@@ -184,11 +180,15 @@ def register():
         conn.commit()
         conn.close()
 
+        # 🧹 HARD CLEANUP (IMPORTANT)
+        del img, face, emb
+        gc.collect()
+
         return jsonify(success=True, msg="Sample saved")
 
     except Exception as e:
         print("❌ REGISTER ERROR:", e)
-        return jsonify(success=False, msg=str(e)), 500
+        return jsonify(success=False, msg="Server error"), 500
 
 # ================= LOGIN (FACE) =================
 @app.route("/login/face", methods=["POST"])
@@ -205,13 +205,13 @@ def face_login():
             cv2.IMREAD_COLOR
         )
 
-        img = cv2.resize(img, (320, 240))
+        img = cv2.resize(img, (224, 224))
 
         face = detect_face(img)
         if face is None:
             return jsonify(success=False, msg="No face detected")
 
-        emb = get_embedding(face)
+        emb = get_embedding(face).astype(np.float32)
 
         conn, cur = get_db()
         cur.execute("SELECT embedding FROM embeddings WHERE email=?", (email,))
@@ -219,17 +219,21 @@ def face_login():
         conn.close()
 
         for r in rows:
-            stored = np.frombuffer(r[0], dtype=np.float32)
+            stored = np.frombuffer(r[0], dtype=np.float16).astype(np.float32)
             if cosine_sim(emb, stored) >= THRESHOLD:
                 session["user"] = email
+                del img, face, emb
+                gc.collect()
                 return jsonify(success=True, msg="Login successful")
 
+        del img, face, emb
+        gc.collect()
         return jsonify(success=False, msg="Face does not match")
 
     except Exception as e:
         print("❌ LOGIN ERROR:", e)
-        return jsonify(success=False, msg=str(e)), 500
+        return jsonify(success=False, msg="Server error"), 500
 
 # ================= MAIN =================
 if __name__ == "__main__":
-    app.run(debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=5000, use_reloader=False)
