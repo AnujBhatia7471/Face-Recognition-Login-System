@@ -6,11 +6,8 @@ import os
 import onnxruntime as ort
 import urllib.request
 import threading
-import sys
-import traceback
 
 print("🔥 app.py started")
-print("📁 BASE DIR:", os.getcwd())
 
 # ================= APP =================
 app = Flask(__name__)
@@ -41,51 +38,42 @@ CREATE TABLE IF NOT EXISTS embeddings (
 conn.commit()
 conn.close()
 
-# ================= VERIFY OPENCV FILES =================
-PROTO_PATH = os.path.join(BASE_DIR, "deploy.prototxt")
-MODEL_PATH_CAFFE = os.path.join(BASE_DIR, "res10_300x300_ssd_iter_140000.caffemodel")
-
-print("🔍 prototxt exists:", os.path.exists(PROTO_PATH))
-print("🔍 caffemodel exists:", os.path.exists(MODEL_PATH_CAFFE))
-
-if not os.path.exists(PROTO_PATH) or not os.path.exists(MODEL_PATH_CAFFE):
-    print("❌ OpenCV model files missing — Render WILL FAIL")
-else:
-    print("✅ OpenCV model files found")
-
 # ================= FACE DETECTOR =================
-face_detector = cv2.dnn.readNetFromCaffe(PROTO_PATH, MODEL_PATH_CAFFE)
+face_detector = cv2.dnn.readNetFromCaffe(
+    os.path.join(BASE_DIR, "deploy.prototxt"),
+    os.path.join(BASE_DIR, "res10_300x300_ssd_iter_140000.caffemodel")
+)
 
-# ================= ARC FACE (HUGGINGFACE SAFE LOAD) =================
-ARC_URL = (
+# ================= ARC FACE (LAZY LOAD — SAME AS YOURS) =================
+MODEL_URL = (
     "https://huggingface.co/FoivosPar/Arc2Face/resolve/"
     "da2f1e9aa3954dad093213acfc9ae75a68da6ffd/arcface.onnx"
 )
-ARC_PATH = os.path.join(BASE_DIR, "arcface.onnx")
+MODEL_PATH = os.path.join(BASE_DIR, "arcface.onnx")
 
 arcface = None
 arc_input_name = None
 arc_lock = threading.Lock()
 THRESHOLD = 0.50
 
-def ensure_arcface():
-    if not os.path.exists(ARC_PATH):
+def ensure_model():
+    if not os.path.exists(MODEL_PATH):
         print("⬇️ Downloading ArcFace model...")
-        urllib.request.urlretrieve(ARC_URL, ARC_PATH)
-        print("✅ ArcFace downloaded")
+        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+        print("✅ ArcFace model downloaded")
 
 def get_arcface():
     global arcface, arc_input_name
     with arc_lock:
         if arcface is None:
-            ensure_arcface()
+            ensure_model()
             arcface = ort.InferenceSession(
-                ARC_PATH,
+                MODEL_PATH,
                 providers=["CPUExecutionProvider"]
             )
             arc_input_name = arcface.get_inputs()[0].name
-            print("✅ ArcFace input:", arc_input_name)
-            print("✅ ArcFace shape:", arcface.get_inputs()[0].shape)
+            print("✅ ArcFace input name:", arc_input_name)
+            print("✅ ArcFace input shape:", arcface.get_inputs()[0].shape)
     return arcface
 
 # ================= UTILS =================
@@ -116,7 +104,7 @@ def get_embedding(face):
     face = cv2.resize(face, (112, 112))
     face = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
     face = face.astype(np.float32) / 255.0
-    face = np.expand_dims(face, axis=0)  # NHWC
+    face = np.expand_dims(face, axis=0)
 
     session = get_arcface()
     emb = session.run(None, {arc_input_name: face})[0][0]
@@ -127,84 +115,133 @@ def get_embedding(face):
 def index():
     return render_template("index.html")
 
+@app.route("/register-page")
+def register_page():
+    return render_template("register.html")
+
+@app.route("/dashboard")
+def dashboard():
+    if not session.get("user"):
+        return redirect("/")
+    return render_template("dashboard.html", email=session["user"])
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/")
+
+# ================= REGISTER =================
 @app.route("/register", methods=["POST"])
 def register():
-    try:
-        email = request.form.get("email", "").lower()
-        password = request.form.get("password", "")
-        image = request.files.get("image")
+    email = request.form.get("email", "").strip().lower()
+    password = request.form.get("password", "")
+    image = request.files.get("image")
 
-        if not email or not password or not image:
-            return jsonify(success=False, msg="Missing data")
+    if not email or not password or not image:
+        return jsonify(success=False, msg="Missing data")
 
-        img = cv2.imdecode(
-            np.frombuffer(image.read(), np.uint8),
-            cv2.IMREAD_COLOR
-        )
+    conn, cur = get_db()
 
-        # ⬇️ Resize for Render memory safety
-        img = cv2.resize(img, (640, 480))
+    cur.execute("SELECT COUNT(*) FROM embeddings WHERE email=?", (email,))
+    if cur.fetchone()[0] >= 5:
+        conn.close()
+        return jsonify(success=False, msg="Already fully registered")
 
-        face = detect_face(img)
-        if face is None:
-            return jsonify(success=False, msg="No face detected")
-
-        emb = get_embedding(face)
-
-        conn, cur = get_db()
+    cur.execute("SELECT email FROM users WHERE email=?", (email,))
+    if not cur.fetchone():
         cur.execute(
-            "INSERT OR IGNORE INTO users VALUES (?, ?)",
+            "INSERT INTO users (email, password) VALUES (?, ?)",
             (email, password)
         )
-        cur.execute(
-            "INSERT INTO embeddings (email, embedding) VALUES (?, ?)",
-            (email, emb.tobytes())
-        )
-        conn.commit()
+
+    img = cv2.imdecode(
+        np.frombuffer(image.read(), np.uint8),
+        cv2.IMREAD_COLOR
+    )
+
+    # 🔥 RENDER MEMORY FIX (ONLY CHANGE)
+    img = cv2.resize(img, (640, 480))
+
+    face = detect_face(img)
+    if face is None:
         conn.close()
+        return jsonify(success=False, msg="No face detected")
 
-        return jsonify(success=True, msg="Registered")
+    emb = get_embedding(face)
 
-    except Exception as e:
-        print("🔥 REGISTER ERROR")
-        traceback.print_exc()
-        return jsonify(success=False, error=str(e)), 500
+    cur.execute(
+        "INSERT INTO embeddings (email, embedding) VALUES (?, ?)",
+        (email, emb.tobytes())
+    )
 
+    cur.execute("SELECT COUNT(*) FROM embeddings WHERE email=?", (email,))
+    count = cur.fetchone()[0]
+
+    conn.commit()
+    conn.close()
+
+    return jsonify(
+        success=True,
+        completed=(count == 5),
+        msg="✅ Registration completed" if count == 5 else f"Face saved ({count}/5)"
+    )
+
+# ================= LOGIN (PASSWORD) =================
+@app.route("/login/password", methods=["POST"])
+def password_login():
+    data = request.get_json()
+    email = data.get("email")
+    password = data.get("password")
+
+    conn, cur = get_db()
+    cur.execute("SELECT password FROM users WHERE email=?", (email,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row or row[0] != password:
+        return jsonify(success=False, msg="Invalid credentials")
+
+    session["user"] = email
+    return jsonify(success=True, msg="Login successful")
+
+# ================= LOGIN (FACE) =================
 @app.route("/login/face", methods=["POST"])
 def face_login():
-    try:
-        email = request.form.get("email")
-        image = request.files.get("image")
+    email = request.form.get("email")
+    image = request.files.get("image")
 
-        img = cv2.imdecode(
-            np.frombuffer(image.read(), np.uint8),
-            cv2.IMREAD_COLOR
-        )
-        img = cv2.resize(img, (640, 480))
+    if not email or not image:
+        return jsonify(success=False, msg="Missing data")
 
-        face = detect_face(img)
-        if face is None:
-            return jsonify(success=False, msg="No face detected")
+    conn, cur = get_db()
+    cur.execute("SELECT embedding FROM embeddings WHERE email=?", (email,))
+    rows = cur.fetchall()
+    conn.close()
 
-        emb = get_embedding(face)
+    if not rows:
+        return jsonify(success=False, msg="User not registered")
 
-        conn, cur = get_db()
-        cur.execute("SELECT embedding FROM embeddings WHERE email=?", (email,))
-        rows = cur.fetchall()
-        conn.close()
+    img = cv2.imdecode(
+        np.frombuffer(image.read(), np.uint8),
+        cv2.IMREAD_COLOR
+    )
 
-        for r in rows:
-            stored = np.frombuffer(r[0], dtype=np.float32)
-            if cosine_sim(emb, stored) >= THRESHOLD:
-                session["user"] = email
-                return jsonify(success=True, msg="Login success")
+    # 🔥 RENDER MEMORY FIX (ONLY CHANGE)
+    img = cv2.resize(img, (640, 480))
 
-        return jsonify(success=False, msg="Face mismatch")
+    face = detect_face(img)
+    if face is None:
+        return jsonify(success=False, msg="No face detected")
 
-    except Exception as e:
-        print("🔥 LOGIN ERROR")
-        traceback.print_exc()
-        return jsonify(success=False, error=str(e)), 500
+    emb = get_embedding(face)
+
+    for r in rows:
+        stored = np.frombuffer(r[0], dtype=np.float32)
+        if cosine_sim(emb, stored) >= THRESHOLD:
+            session["user"] = email
+            return jsonify(success=True, msg="Login successful")
+
+    return jsonify(success=False, msg="Face does not match")
 
 # ================= MAIN =================
 if __name__ == "__main__":
