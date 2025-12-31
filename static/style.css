@@ -71,25 +71,38 @@ a {
 }
 
 /* ================= MOBILE ================= */
+/* ================= MOBILE ================= */
 @media (max-width: 480px) {
   body {
-    padding: 12px;
-    align-items: flex-start;
+    padding: 0;
+    margin: 0;
+    min-height: 100vh;
+    justify-content: flex-start;
+    align-items: stretch;
   }
 
   .container {
     width: 100%;
-    max-width: 380px;
-    padding: 22px;
+    max-width: 100%;
+    min-height: 100vh;
+
+    padding: 24px 20px;
+
+    border-radius: 0;        /* 🔥 full screen look */
+    box-shadow: none;        /* 🔥 remove card effect */
+
+    display: flex;
+    flex-direction: column;
+    justify-content: center; /* center content vertically */
+  }
+
+  h2 {
+    margin-bottom: 24px;
   }
 
   video {
-    max-height: 240px;
+    max-height: 260px;
     object-fit: cover;
   }
 }
-.divider {
-  display: flex;
-  justify-content: center;
-  margin-bottom: 15px;
-}
+
