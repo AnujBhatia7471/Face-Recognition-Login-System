@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Login</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="container">
+  <h2>Login</h2>
+
+  <input type="email" id="p_email" placeholder="Email">
+  <input id="p_password" type="password" placeholder="Password">
+  <button onclick="passwordLogin()">Login with Password</button>
+
+  <div class="divider">OR</div>
+
+  <input type="email" id="f_email" placeholder="Email">
+  <button onclick="faceLogin()">Login with Face</button>
+
+  <video id="video" style="display:none;" muted></video>
+  <canvas id="canvas" style="display:none;"></canvas>
+
+  <p id="result"></p>
+  <a href="/register-page">New user? Register</a>
+</div>
+
+<script src="/static/script.js"></script>
+<script src="/static/login.js"></script>
+</body>
+</html>

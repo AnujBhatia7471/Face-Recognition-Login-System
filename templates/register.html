@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Register</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="container">
+  <h2>Register</h2>
+
+  <input type="email" id="email" placeholder="Email">
+  <input id="password" type="password" placeholder="Password">
+
+  <video id="video" style="display:none;" muted></video>
+  <canvas id="canvas" style="display:none;"></canvas>
+
+  <button id="startBtn" onclick="startRegistration()">Start Camera</button>
+  <button id="sampleBtn" onclick="takeSample()" disabled>
+    Take Sample (1 / 5)
+  </button>
+
+  <p id="result"></p>
+  <a href="/">Already registered? Login</a>
+</div>
+
+<script src="/static/script.js"></script>
+<script src="/static/register.js"></script>
+</body>
+</html>
