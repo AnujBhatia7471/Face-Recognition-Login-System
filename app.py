@@ -1,87 +1,94 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, session, redirect
 import cv2
 import sqlite3
 import numpy as np
-import onnxruntime as ort
 import os
-import urllib.request
+import time
+import traceback
+import onnxruntime as ort
 
-# ================= CONFIG =================
-THRESHOLD = 0.50
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# ================= ARC FACE MODEL (PUBLIC LINK) =================
-ARC_MODEL_URL = (
-    "https://huggingface.co/FoivosPar/Arc2Face/"
-    "resolve/da2f1e9aa3954dad093213acfc9ae75a68da6ffd/arcface.onnx"
-)
-ARC_MODEL_PATH = os.path.join(BASE_DIR, "arcface.onnx")
-
-# Download model once
-if not os.path.exists(ARC_MODEL_PATH):
-    print("⬇️ Downloading ArcFace model...")
-    urllib.request.urlretrieve(ARC_MODEL_URL, ARC_MODEL_PATH)
-    print("✅ ArcFace model ready")
-
-# ================= APP =================
 app = Flask(__name__)
+app.secret_key = "super-secret-key"
+app.debug = True
+
+# ================= RATE LIMIT =================
+RATE_LIMIT = {}
+MAX_ATTEMPTS = 5
+WINDOW = 60
+
+def rate_limited(ip):
+    now = time.time()
+    RATE_LIMIT.setdefault(ip, [])
+    RATE_LIMIT[ip] = [t for t in RATE_LIMIT[ip] if now - t < WINDOW]
+    if len(RATE_LIMIT[ip]) >= MAX_ATTEMPTS:
+        return True
+    RATE_LIMIT[ip].append(now)
+    return False
 
 # ================= DATABASE =================
-conn = sqlite3.connect("users.db", check_same_thread=False)
-cur = conn.cursor()
+def get_db():
+    conn = sqlite3.connect("users.db", check_same_thread=False)
+    return conn, conn.cursor()
 
-# HARD RESET SCHEMA (SAFE & CLEAN)
+conn, cur = get_db()
 cur.execute("""
 CREATE TABLE IF NOT EXISTS users (
     email TEXT PRIMARY KEY,
+    password TEXT NOT NULL
+)
+""")
+cur.execute("""
+CREATE TABLE IF NOT EXISTS embeddings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL,
     embedding BLOB NOT NULL
 )
 """)
 conn.commit()
+conn.close()
 
-# ================= FACE DETECTOR =================
+# ================= MODELS =================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 face_detector = cv2.dnn.readNetFromCaffe(
     os.path.join(BASE_DIR, "deploy.prototxt"),
     os.path.join(BASE_DIR, "res10_300x300_ssd_iter_140000.caffemodel")
 )
 
-# ================= ARC FACE =================
 arcface = ort.InferenceSession(
-    ARC_MODEL_PATH,
+    os.path.join(BASE_DIR, "arcface.onnx"),
     providers=["CPUExecutionProvider"]
 )
-arcface_input_name = arcface.get_inputs()[0].name
+arc_input = arcface.get_inputs()[0].name
+arc_input_shape = arcface.get_inputs()[0].shape
+THRESHOLD = 0.50
 
 # ================= UTILS =================
 def cosine_sim(a, b):
-    a = a / np.linalg.norm(a)
-    b = b / np.linalg.norm(b)
-    return float(np.dot(a, b))
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 def detect_face(img):
     h, w = img.shape[:2]
-    blob = cv2.dnn.blobFromImage(img, 1.0, (300, 300), (104, 177, 123))
+    blob = cv2.dnn.blobFromImage(img, 1.0, (300, 300), (104,177,123))
     face_detector.setInput(blob)
-    detections = face_detector.forward()
+    dets = face_detector.forward()
 
-    for i in range(detections.shape[2]):
-        confidence = detections[0, 0, i, 2]
-        if confidence > 0.9:
-            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-            x1, y1, x2, y2 = box.astype(int)
-
-            if x1 < 0 or y1 < 0 or x2 > w or y2 > h:
-                return None
-
-            return img[y1:y2, x1:x2]
+    for i in range(dets.shape[2]):
+        if dets[0,0,i,2] > 0.9:
+            box = dets[0,0,i,3:7] * np.array([w,h,w,h])
+            x1,y1,x2,y2 = box.astype(int)
+            face = img[y1:y2, x1:x2]
+            return face if face.size else None
     return None
 
 def get_embedding(face):
-    face = cv2.resize(face, (112, 112))
+    face = cv2.resize(face, (112,112))
+    face = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
     face = face.astype(np.float32) / 255.0
+    if arc_input_shape == [1,3,112,112]:
+        face = np.transpose(face, (2,0,1))
     face = np.expand_dims(face, axis=0)
-
-    emb = arcface.run(None, {arcface_input_name: face})[0][0]
+    emb = arcface.run(None, {arc_input: face})[0][0]
     return emb / np.linalg.norm(emb)
 
 # ================= ROUTES =================
@@ -93,76 +100,130 @@ def index():
 def register_page():
     return render_template("register.html")
 
+@app.route("/dashboard")
+def dashboard():
+    if not session.get("user"):
+        return redirect("/")
+    return render_template("dashboard.html", email=session["user"])
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/")
+
+# ================= REGISTER (FIXED) =================
 @app.route("/register", methods=["POST"])
 def register():
-    email = request.form.get("email", "").strip().lower()
-    print("REGISTER:", email)
+    try:
+        email = request.form.get("email", "").strip().lower()
+        password = request.form.get("password", "")
+        image = request.files.get("image")
 
-    if not email:
-        return jsonify({"success": False, "msg": "Email required"})
+        if not email or not password or not image:
+            return jsonify(success=False, msg="Missing data")
 
-    cur.execute("SELECT email FROM users WHERE email=?", (email,))
-    if cur.fetchone():
-        return jsonify({"success": False, "msg": "Email already registered"})
+        conn, cur = get_db()
 
-    file = request.files.get("image")
-    if not file:
-        return jsonify({"success": False, "msg": "No image provided"})
+        # count existing samples
+        cur.execute("SELECT COUNT(*) FROM embeddings WHERE email=?", (email,))
+        count = cur.fetchone()[0]
 
-    img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), cv2.IMREAD_COLOR)
-    face = detect_face(img)
+        if count >= 5:
+            conn.close()
+            return jsonify(
+                success=False,
+                msg="This email is already fully registered"
+            )
 
-    if face is None:
-        return jsonify({"success": False, "msg": "No face detected"})
+        # create user only once
+        cur.execute("SELECT email FROM users WHERE email=?", (email,))
+        if not cur.fetchone():
+            cur.execute(
+                "INSERT INTO users (email, password) VALUES (?, ?)",
+                (email, password)
+            )
 
-    emb = get_embedding(face)
+        img = cv2.imdecode(
+            np.frombuffer(image.read(), np.uint8),
+            cv2.IMREAD_COLOR
+        )
 
-    cur.execute(
-        "INSERT INTO users (email, embedding) VALUES (?, ?)",
-        (email, emb.tobytes())
-    )
-    conn.commit()
+        face = detect_face(img)
+        if face is None:
+            conn.close()
+            return jsonify(success=False, msg="No face detected")
 
-    print("REGISTERED:", email)
-    return jsonify({"success": True, "msg": "Registration successful"})
+        emb = get_embedding(face)
+        cur.execute(
+            "INSERT INTO embeddings (email, embedding) VALUES (?, ?)",
+            (email, emb.tobytes())
+        )
 
-@app.route("/login", methods=["POST"])
-def login():
-    email = request.form.get("email", "").strip().lower()
-    print("LOGIN:", email)
+        cur.execute("SELECT COUNT(*) FROM embeddings WHERE email=?", (email,))
+        new_count = cur.fetchone()[0]
 
-    if not email:
-        return jsonify({"success": False, "msg": "Email required"})
+        conn.commit()
+        conn.close()
 
-    cur.execute("SELECT embedding FROM users WHERE email=?", (email,))
+        if new_count == 5:
+            return jsonify(
+                success=True,
+                completed=True,
+                msg="✅ Registration completed successfully"
+            )
+
+        return jsonify(
+            success=True,
+            completed=False,
+            msg=f"Face sample saved ({new_count} / 5)"
+        )
+
+    except Exception:
+        traceback.print_exc()
+        return jsonify(success=False, msg="Internal server error")
+
+# ================= LOGIN =================
+@app.route("/login/password", methods=["POST"])
+def password_login():
+    data = request.get_json()
+    email = data.get("email")
+    password = data.get("password")
+
+    conn, cur = get_db()
+    cur.execute("SELECT password FROM users WHERE email=?", (email,))
     row = cur.fetchone()
+    conn.close()
 
-    if not row:
-        return jsonify({"success": False, "msg": "User not found"})
+    if not row or row[0] != password:
+        return jsonify(success=False, msg="Invalid credentials")
 
-    file = request.files.get("image")
-    if not file:
-        return jsonify({"success": False, "msg": "No image provided"})
+    session["user"] = email
+    return jsonify(success=True, msg="Login successful")
 
-    img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), cv2.IMREAD_COLOR)
+@app.route("/login/face", methods=["POST"])
+def face_login():
+    email = request.form.get("email")
+    image = request.files.get("image")
+
+    conn, cur = get_db()
+    cur.execute("SELECT embedding FROM embeddings WHERE email=?", (email,))
+    rows = cur.fetchall()
+    conn.close()
+
+    img = cv2.imdecode(
+        np.frombuffer(image.read(), np.uint8),
+        cv2.IMREAD_COLOR
+    )
     face = detect_face(img)
-
-    if face is None:
-        return jsonify({"success": False, "msg": "No face detected"})
-
-    stored_emb = np.frombuffer(row[0], dtype=np.float32)
     emb = get_embedding(face)
-    score = cosine_sim(emb, stored_emb)
 
-    if score >= THRESHOLD:
-        return jsonify({
-            "success": True,
-            "email": email,
-            "similarity": round(score, 3)
-        })
+    for r in rows:
+        stored = np.frombuffer(r[0], dtype=np.float32)
+        if cosine_sim(emb, stored) >= THRESHOLD:
+            session["user"] = email
+            return jsonify(success=True, msg="Login successful")
 
-    return jsonify({"success": False, "msg": "Face does not match"})
+    return jsonify(success=False, msg="Face does not match")
 
-# ================= RUN =================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run()
