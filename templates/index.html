@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Face Login</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="box">
+  <h2>Face Login</h2>
+
+  <input type="email" id="email" placeholder="Email" />
+<video id="video" width="300" autoplay></video>
+<button onclick="capture()">Capture & Login</button>
+
+<canvas id="canvas" width="300" height="225" style="display:none;"></canvas>
+<p id="result"></p>
+  <button onclick="login()">Login</button>
+
+  <p id="result"></p>
+</div>
+
+<script src="/static/script.js"></script>
+</body>
+</html>
