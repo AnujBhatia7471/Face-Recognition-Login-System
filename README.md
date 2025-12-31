@@ -64,37 +64,18 @@ pip install -r requirements.txt
 🧠 Model Downloads (Required)
 This project uses pretrained models which are not included in the repository.
 
-🔹 ArcFace (Face Recognition)
-Download an ArcFace ONNX model from:
-
-
-https://github.com/deepinsight/insightface/tree/master/model_zoo
-Rename the file to:
-arcface.onnx
-Place it in the project root directory.
-
-🔹 OpenCV Face Detector (Caffe)
-Download the model from:
-https://github.com/opencv/opencv_3rdparty/raw/dnn_samples_face_detector_20170830/res10_300x300_ssd_iter_140000.caffemodel
-Place it in the project root directory.
-
-deploy.prototxt is already included in the repository.
-
 🧑‍💻 Usage
 1️⃣ Register a new user (Face Enrollment)
 python app_cli.py
 Enter email and password
-
 Press SPACE to capture face samples
-
 Press ESC to cancel
 
 2️⃣ Start the Flask server
-bash
-Copy code
 python app.py
 Open browser:
-http://127.0.0.1:5000
+http://localhost:10000
+
 
 🔐 Security Notes
 Facial embeddings are stored securely as vectors
@@ -112,5 +93,6 @@ This project is for educational and learning purposes.
 👤 Author
 Anuj Bhatia
 GitHub: https://github.com/AnujBhatia7471
+
 
 
