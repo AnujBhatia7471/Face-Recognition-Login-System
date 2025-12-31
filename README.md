@@ -68,7 +68,7 @@ This approach reflects standard industry deployment practices
 Start the Application
 python app.py
 Open in Browser
-http://localhost:10000
+http://localhost:5000/
 
 **Application Workflow** 
 Face Registration
@@ -113,3 +113,4 @@ GitHub: https://github.com/AnujBhatia7471
 **Summary**
 This project presents a complete facial authentication pipeline, integrating computer vision, deep learning inference, backend APIs, and frontend camera handling.
 It effectively demonstrates the development of an AI-powered web authentication system.
+
